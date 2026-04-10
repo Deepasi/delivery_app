@@ -11,7 +11,7 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import {
   Phone, Package, User, CheckCircle2, X,
   ChevronRight, ShoppingBag, AlertTriangle, Clock,
-  MapPin, Loader2,
+  MapPin, Loader2, Camera, Upload,
 } from "lucide-react"
 // import {createClient } from "@/lib/supabaseClient"
 import { supabase } from "@/lib/supabaseClient"
@@ -64,6 +64,15 @@ export default function ArrivalModal({
   const [fetchState,  setFetchState]  = useState<"loading" | "done" | "error">("loading")
 // const { data, error } = await supabase
   const isCOD = order.payment_method?.toLowerCase().includes("cod")
+
+  // ── Photo upload state ───────────────────────────────────────────────────────
+  const [uploadingPhoto, setUploadingPhoto] = useState(false)
+  const [photoUrl, setPhotoUrl] = useState<string | null>(order.delivery_proof_url || null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // ── OTP state ────────────────────────────────────────────────────────────────
+  const [otpInput, setOtpInput] = useState("")
+  const [otpVerified, setOtpVerified] = useState(!!order.delivery_otp_verified_at)
 
   // ── Fetch order_items joined with products on mount ──────────────────────────
   useEffect(() => {
@@ -134,6 +143,66 @@ export default function ArrivalModal({
   }, [confirmed])
 
   useEffect(() => () => { clearInterval(holdTimer.current!) }, [])
+
+  // ── Photo upload handler ─────────────────────────────────────────────────────
+  const handlePhotoUpload = useCallback(async (file: File) => {
+    if (!file) return
+    setUploadingPhoto(true)
+    try {
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${order.id}_${Date.now()}.${fileExt}`
+      const filePath = fileName
+
+      const { error: uploadError } = await supabase.storage
+        .from('delivery-proofs')
+        .upload(filePath, file)
+
+      if (uploadError) throw uploadError
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('delivery-proofs')
+        .getPublicUrl(filePath)
+
+      // Update order with proof details
+      const { error: updateError } = await supabase
+        .from('orders')
+        .update({
+          delivery_proof_url: publicUrl,
+          delivery_proof_uploaded_at: new Date().toISOString(),
+          delivery_proof_status: 'uploaded'
+        })
+        .eq('id', order.id)
+
+      if (updateError) throw updateError
+
+      setPhotoUrl(publicUrl)
+    } catch (error) {
+      console.error('Failed to upload photo:', error)
+      alert('Failed to upload photo. Please try again.')
+    } finally {
+      setUploadingPhoto(false)
+    }
+  }, [order.id])
+
+  const onFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) handlePhotoUpload(file)
+  }, [handlePhotoUpload])
+
+  // ── OTP verification ─────────────────────────────────────────────────────────
+  const handleOtpVerify = useCallback(async () => {
+    if (!otpInput.trim()) return
+    if (otpInput === order.delivery_otp) {
+      setOtpVerified(true)
+      // Update verified timestamp
+      await supabase
+        .from('orders')
+        .update({ delivery_otp_verified_at: new Date().toISOString() })
+        .eq('id', order.id)
+    } else {
+      alert('Invalid OTP. Please try again.')
+    }
+  }, [otpInput, order.delivery_otp, order.id])
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
@@ -350,6 +419,102 @@ export default function ArrivalModal({
                 </span>
               </div>
             )}
+
+            {/* ── Photo proof ── */}
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  Delivery Proof
+                </span>
+                {photoUrl && (
+                  <span className="text-xs text-green-600 font-semibold">✓ Uploaded</span>
+                )}
+              </div>
+              {photoUrl ? (
+                <div className="relative">
+                  <img
+                    src={photoUrl}
+                    alt="Delivery proof"
+                    className="w-full h-32 object-cover rounded-xl border border-slate-200"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="absolute top-2 right-2 bg-white/90 backdrop-blur rounded-full p-2 shadow-lg hover:bg-white transition-colors"
+                    title="Retake photo"
+                  >
+                    <Camera className="w-4 h-4 text-slate-600" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadingPhoto}
+                  className="w-full h-32 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center gap-2 hover:border-slate-400 transition-colors disabled:opacity-50"
+                >
+                  {uploadingPhoto ? (
+                    <>
+                      <Loader2 className="w-6 h-6 text-slate-400 animate-spin" />
+                      <span className="text-sm text-slate-500">Uploading...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-6 h-6 text-slate-400" />
+                      <span className="text-sm text-slate-500">Take Photo Proof</span>
+                    </>
+                  )}
+                </button>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={onFileChange}
+                className="hidden"
+              />
+            </div>
+
+            {/* ── OTP Verification ── */}
+            {photoUrl && (
+              <div className="mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 rounded-full bg-blue-100 flex items-center justify-center">
+                      <span className="text-xs">🔒</span>
+                    </div>
+                    <span className="text-sm font-black text-slate-700 uppercase tracking-wider">
+                      OTP Verification
+                    </span>
+                  </div>
+                  {otpVerified && (
+                    <span className="text-xs text-green-600 font-semibold">✓ Verified</span>
+                  )}
+                </div>
+                {otpVerified ? (
+                  <div className="flex items-center gap-2 bg-green-50 rounded-xl px-3 py-2">
+                    <CheckCircle2 className="w-4 h-4 text-green-600" />
+                    <span className="text-sm text-green-700 font-medium">OTP Verified</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      value={otpInput}
+                      onChange={(e) => setOtpInput(e.target.value)}
+                      placeholder="Enter delivery OTP"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <button
+                      onClick={handleOtpVerify}
+                      disabled={!otpInput.trim()}
+                      className="w-full py-2 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-500 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Verify OTP
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* ── Hold-to-confirm ── */}
@@ -377,16 +542,19 @@ export default function ArrivalModal({
                   onTouchStart={startHold}
                   onTouchEnd={endHold}
                   onTouchCancel={endHold}
+                  disabled={!photoUrl || !otpVerified}
                   className={`w-full py-4 rounded-2xl font-black text-lg flex items-center
                     justify-center gap-3 select-none transition-all duration-150 ${
-                    holding
+                    !photoUrl || !otpVerified
+                      ? "bg-slate-300 text-slate-500 cursor-not-allowed"
+                      : holding
                       ? "bg-green-500 text-white scale-[0.98] shadow-lg shadow-green-200"
                       : "bg-green-600 text-white hover:bg-green-500 active:scale-95"
                   }`}
                   style={{ userSelect: "none", WebkitUserSelect: "none" }}
                 >
                   <CheckCircle2 className={`w-6 h-6 ${holding ? "animate-pulse" : ""}`} />
-                  {holding ? "Keep holding…" : "Hold to Confirm Delivery"}
+                  {!photoUrl ? "Upload Photo to Confirm" : !otpVerified ? "Verify OTP to Confirm" : holding ? "Keep holding…" : "Hold to Confirm Delivery"}
                 </button>
                 <p className="text-center text-xs text-slate-400 mt-1.5">
                   Hold for {HOLD_MS / 1000}s to prevent accidental marks
